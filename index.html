@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ワークシートページ切り出しツール</title>
+    
+    <!-- Tailwind CSS (デザイン用) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- PDF.js (PDF読み込み用) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        // Workerの設定
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        
+        // 日本語フォント等の文字化け対策（CMaps設定）
+        pdfjsLib.GlobalWorkerOptions.cMapUrl = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/';
+        pdfjsLib.GlobalWorkerOptions.cMapPacked = true;
+
+        // 【追加修正】標準フォントデータのパス設定（フォント未埋め込みPDF対策）
+        pdfjsLib.GlobalWorkerOptions.standardFontDataUrl = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/';
+    </script>
+
+    <!-- jsPDF (PDF生成用) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap');
+        body { font-family: 'Noto Sans JP', sans-serif; }
+        
+        .drag-active { border-color: #3b82f6; background-color: #eff6ff; }
+        
+        /* プレビューリストのスクロールバー */
+        .custom-scrollbar::-webkit-scrollbar { height: 8px; width: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* A4プレビュー用の比率固定 (A4は 1:1.414) */
+        .a4-preview {
+            aspect-ratio: 210 / 297;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        
+        .loading-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,255,255,0.8); z-index: 50;
+            display: none; justify-content: center; align-items: center;
+        }
+
+        /* サムネイル選択スタイル */
+        .page-thumbnail {
+            transition: all 0.2s;
+            border: 3px solid transparent;
+            cursor: pointer;
+            position: relative;
+            background: white;
+        }
+        .page-thumbnail:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .page-thumbnail.selected {
+            border-color: #3b82f6; /* blue-500 */
+            background-color: #eff6ff; /* blue-50 */
+        }
+        .page-thumbnail .check-mark {
+            display: none;
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            background: #3b82f6;
+            color: white;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            font-size: 12px;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+            z-index: 10;
+        }
+        .page-thumbnail.selected .check-mark {
+            display: flex;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 h-screen flex flex-col">
+
+    <!-- ヘッダー -->
+    <header class="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center shadow-sm shrink-0">
+        <div>
+            <h1 class="text-xl font-bold text-blue-600 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                ワークシートページ切り出しツール
+            </h1>
+            <p class="text-xs text-slate-500 mt-1">PDF教科書や画像から必要な部分だけを抽出し、1枚のプリントにまとめます（完全オフライン処理）</p>
+        </div>
+        <div class="flex gap-3">
+            <button onclick="clearAll()" class="text-sm text-red-500 hover:text-red-700 font-medium px-3 py-2">全てクリア</button>
+        </div>
+    </header>
+
+    <!-- メインコンテンツ -->
+    <main class="flex-1 flex overflow-hidden">
+        
+        <!-- 左側：素材管理エリア -->
+        <section class="w-1/3 min-w-[350px] bg-white border-r border-slate-200 flex flex-col overflow-y-auto custom-scrollbar">
+            <div class="p-4 border-b border-slate-100 bg-slate-50">
+                <h2 class="font-bold text-sm text-slate-700 mb-2">1. 素材の追加（PDF / 画像）</h2>
+                
+                <!-- ドラッグ＆ドロップエリア -->
+                <div id="drop-zone" class="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center cursor-pointer transition-colors hover:border-blue-400 hover:bg-blue-50">
+                    <input type="file" id="file-input" multiple accept="application/pdf,image/*" class="hidden">
+                    <div class="pointer-events-none">
+                        <svg class="mx-auto h-8 w-8 text-slate-400" stroke="currentColor" fill="none" viewBox="0 0 48 48"><path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                        <p class="mt-2 text-sm text-slate-600">ここをクリック または ファイルをドロップ</p>
+                        <p class="text-xs text-slate-400 mt-1">PDF, JPG, PNGに対応</p>
+                    </div>
+                </div>
+
+                <!-- ページ指定入力（PDF用） -->
+                <div id="page-selector" class="hidden mt-3 bg-white p-4 rounded-lg border border-slate-200 shadow-sm relative z-10">
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="font-bold text-slate-700 text-sm">ページを選択</h3>
+                        <span class="text-xs text-slate-500" id="pdf-total-pages"></span>
+                    </div>
+
+                    <!-- 範囲選択ツール -->
+                    <div class="flex gap-2 mb-2 items-center bg-slate-50 p-2 rounded">
+                        <input type="text" id="page-range-input" placeholder="例: 1-3, 5" class="flex-1 text-sm border border-slate-300 rounded px-2 py-1">
+                        <button onclick="applyPageRange()" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1 rounded whitespace-nowrap">範囲選択</button>
+                    </div>
+                    <div class="flex gap-2 mb-2 justify-end">
+                        <button onclick="selectAllPages()" class="text-xs text-blue-600 hover:underline px-2">全選択</button>
+                        <button onclick="deselectAllPages()" class="text-xs text-slate-500 hover:underline px-2">全解除</button>
+                    </div>
+
+                    <!-- サムネイルグリッド -->
+                    <div id="pdf-preview-grid" class="grid grid-cols-3 gap-2 max-h-[300px] overflow-y-auto custom-scrollbar p-1 border border-slate-100 rounded bg-slate-50 mb-3">
+                        <!-- サムネイルがここに生成される -->
+                        <div class="text-center col-span-3 py-4 text-xs text-slate-400">プレビュー読み込み中...</div>
+                    </div>
+
+                    <button onclick="confirmPdfExtraction()" class="w-full bg-blue-600 text-white text-sm font-bold py-2 rounded hover:bg-blue-700 shadow flex justify-center items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        選択したページを抽出
+                    </button>
+                </div>
+            </div>
+
+            <!-- 抽出済みリスト -->
+            <div class="p-4 bg-slate-50 flex-1">
+                <h2 class="font-bold text-sm text-slate-700 mb-2 flex justify-between">
+                    <span>2. 配置素材リスト</span>
+                    <span class="text-xs font-normal text-slate-500" id="item-count">0枚</span>
+                </h2>
+                <div id="material-list" class="space-y-2">
+                    <!-- Javascriptでアイテムが追加されます -->
+                    <p class="text-xs text-slate-400 text-center py-4">ファイルを追加してください</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 右側：プレビュー＆設定エリア -->
+        <section class="flex-1 flex flex-col bg-slate-100 min-w-0">
+            <!-- ツールバー (レイアウト調整: flex-wrapを追加して見切れ防止) -->
+            <div class="bg-white border-b border-slate-200 p-3 flex flex-wrap gap-3 justify-between items-center shrink-0">
+                <div class="flex flex-wrap items-center gap-2 sm:gap-4">
+                    <div class="flex items-center gap-2">
+                        <label class="text-sm font-bold text-slate-700 whitespace-nowrap">レイアウト:</label>
+                        <select id="layout-select" onchange="renderPreview()" class="text-sm border border-slate-300 rounded px-2 py-1">
+                            <option value="1">1ページ / 枚 (1x1)</option>
+                            <option value="2">2ページ / 枚 (横並び)</option>
+                            <option value="4" selected>4ページ / 枚 (2x2)</option>
+                        </select>
+                    </div>
+                    <!-- 用紙の向き選択 -->
+                    <div class="flex items-center gap-2 border-l border-slate-300 pl-2 sm:pl-4">
+                         <label class="text-sm font-bold text-slate-700 whitespace-nowrap">向き:</label>
+                        <select id="orientation-select" onchange="renderPreview()" class="text-sm border border-slate-300 rounded px-2 py-1">
+                            <option value="portrait" selected>A4 縦</option>
+                            <option value="landscape">A4 横</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                     <button onclick="downloadPDF()" class="bg-green-600 hover:bg-green-700 text-white text-sm font-bold py-2 px-4 rounded shadow flex items-center gap-2 whitespace-nowrap">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        PDFを作成
+                    </button>
+                </div>
+            </div>
+
+            <!-- プレビューキャンバス -->
+            <div class="flex-1 overflow-auto p-8 flex justify-center bg-slate-200 custom-scrollbar" id="preview-container">
+                <div id="canvas-wrapper" class="relative bg-white shadow-lg transition-transform duration-200 origin-top">
+                    <!-- ここに生成されたCanvas等が表示されます -->
+                    <div class="flex items-center justify-center h-[297mm] w-[210mm] text-slate-300 bg-white">
+                        プレビュー待機中...
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ローディングオーバーレイ -->
+    <div id="loading" class="loading-overlay flex-col">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+        <p class="text-blue-600 font-bold" id="loading-text">処理中...</p>
+    </div>
+
+    <!-- JavaScriptロジック -->
+    <script>
+        // --- 状態管理 ---
+        const state = {
+            materials: [], // { id, type, src (dataURL), originalName, pageNum }
+            currentPdfDoc: null,
+            currentFile: null,
+            selectedPages: new Set(), // 選択中のページ番号(1-based)
+            layout: 4, // 1, 2, or 4
+            orientation: 'portrait' // 'portrait' or 'landscape'
+        };
+
+        // --- DOM要素 ---
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const materialList = document.getElementById('material-list');
+        const canvasWrapper = document.getElementById('canvas-wrapper');
+        const loading = document.getElementById('loading');
+        const loadingText = document.getElementById('loading-text');
+        
+        // PDF選択UI要素
+        const pageSelector = document.getElementById('page-selector');
+        const pdfTotalPages = document.getElementById('pdf-total-pages');
+        const pageRangeInput = document.getElementById('page-range-input');
+        const pdfPreviewGrid = document.getElementById('pdf-preview-grid');
+        
+        const layoutSelect = document.getElementById('layout-select');
+        const orientationSelect = document.getElementById('orientation-select');
+        const itemCount = document.getElementById('item-count');
+
+        // --- イベントリスナー ---
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-active'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-active'));
+        dropZone.addEventListener('drop', handleDrop);
+        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+        function showLoading(msg = '処理中...') {
+            loadingText.innerText = msg;
+            loading.style.display = 'flex';
+        }
+        function hideLoading() {
+            loading.style.display = 'none';
+        }
+
+        // --- ファイル処理 ---
+        function handleDrop(e) {
+            e.preventDefault();
+            dropZone.classList.remove('drag-active');
+            handleFiles(e.dataTransfer.files);
+        }
+
+        async function handleFiles(files) {
+            if (!files || files.length === 0) return;
+
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                if (file.type === 'application/pdf') {
+                    await setupPdfExtraction(file);
+                    // PDFの場合はユーザー入力待ちになるため、ループを抜ける
+                    break; 
+                } else if (file.type.startsWith('image/')) {
+                    await processImage(file);
+                }
+            }
+            fileInput.value = ''; // リセット
+        }
+
+        // --- PDF処理 ---
+        async function setupPdfExtraction(file) {
+            showLoading('PDFを解析中...');
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                
+                // 日本語対応のためにcMapUrl等のオプションを明示的に指定
+                const loadingTask = pdfjsLib.getDocument({
+                    data: arrayBuffer,
+                    cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+                    cMapPacked: true,
+                    // 【追加】標準フォントもここでも指定しておくと安全
+                    standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/'
+                });
+                const pdf = await loadingTask.promise;
+
+                state.currentPdfDoc = pdf;
+                state.currentFile = file;
+                state.selectedPages.clear();
+                
+                // UI表示切り替え
+                pageSelector.classList.remove('hidden');
+                pdfTotalPages.innerText = `${file.name} (全${pdf.numPages}p)`;
+                pageRangeInput.value = '';
+                pdfPreviewGrid.innerHTML = '';
+                
+                // プレビュー生成開始
+                renderPdfThumbnails(pdf);
+                hideLoading();
+                
+            } catch (err) {
+                console.error(err);
+                alert('PDFの読み込みに失敗しました');
+                hideLoading();
+            }
+        }
+
+        async function renderPdfThumbnails(pdf) {
+            pdfPreviewGrid.innerHTML = '';
+            
+            // 処理が重くならないようにチャンク分けして処理
+            const BATCH_SIZE = 10;
+            
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const div = document.createElement('div');
+                div.className = 'page-thumbnail rounded border border-slate-200 bg-white overflow-hidden aspect-[1/1.4] flex flex-col items-center justify-center text-xs text-slate-400 relative';
+                div.innerHTML = `
+                    <div class="loading-spinner">...</div>
+                    <div class="check-mark">✓</div>
+                    <div class="absolute bottom-0 left-0 right-0 bg-slate-100 text-[10px] text-center text-slate-600 py-1">${i}</div>
+                `;
+                div.onclick = () => togglePageSelection(i, div);
+                div.id = `thumb-page-${i}`;
+                pdfPreviewGrid.appendChild(div);
+                
+                // 少し遅延させてレンダリング（UIブロック回避）
+                if (i % BATCH_SIZE === 0) {
+                    await new Promise(r => setTimeout(r, 0));
+                }
+            }
+
+            // 実際の描画処理
+            for (let i = 1; i <= pdf.numPages; i++) {
+                renderSingleThumbnail(pdf, i);
+                 if (i % 5 === 0) await new Promise(r => setTimeout(r, 10)); // 少し休憩
+            }
+        }
+
+        async function renderSingleThumbnail(pdf, pageNum) {
+            try {
+                const page = await pdf.getPage(pageNum);
+                const viewport = page.getViewport({ scale: 0.3 }); // サムネイル用低解像度
+                
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                canvas.className = 'w-full h-full object-contain'; // CSSで調整
+
+                await page.render({ canvasContext: context, viewport: viewport }).promise;
+                
+                const div = document.getElementById(`thumb-page-${pageNum}`);
+                if (div) {
+                    // スピナーを削除してCanvas追加
+                    const spinner = div.querySelector('.loading-spinner');
+                    if(spinner) spinner.remove();
+                    
+                    // ページ番号表示の手前にCanvasを挿入
+                    div.insertBefore(canvas, div.firstChild);
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function togglePageSelection(pageNum, element) {
+            if (state.selectedPages.has(pageNum)) {
+                state.selectedPages.delete(pageNum);
+                element.classList.remove('selected');
+            } else {
+                state.selectedPages.add(pageNum);
+                element.classList.add('selected');
+            }
+        }
+
+        function updateThumbnailsSelection() {
+            // state.selectedPages に基づいて表示を更新
+            for (let i = 1; i <= state.currentPdfDoc.numPages; i++) {
+                const div = document.getElementById(`thumb-page-${i}`);
+                if (div) {
+                    if (state.selectedPages.has(i)) {
+                        div.classList.add('selected');
+                    } else {
+                        div.classList.remove('selected');
+                    }
+                }
+            }
+        }
+
+        function applyPageRange() {
+            if (!state.currentPdfDoc) return;
+            const rangeStr = pageRangeInput.value.trim();
+            if (!rangeStr) return;
+
+            const totalPages = state.currentPdfDoc.numPages;
+            
+            // 範囲解析
+            const parts = rangeStr.split(/,|、/);
+            parts.forEach(part => {
+                if (part.includes('-')) {
+                    const [start, end] = part.split('-').map(n => parseInt(n.trim()));
+                    if (!isNaN(start) && !isNaN(end)) {
+                        for (let i = Math.min(start, end); i <= Math.max(start, end); i++) {
+                            if (i >= 1 && i <= totalPages) state.selectedPages.add(i);
+                        }
+                    }
+                } else {
+                    const page = parseInt(part.trim());
+                    if (!isNaN(page) && page >= 1 && page <= totalPages) {
+                        state.selectedPages.add(page);
+                    }
+                }
+            });
+            updateThumbnailsSelection();
+        }
+
+        function selectAllPages() {
+            if (!state.currentPdfDoc) return;
+            for (let i = 1; i <= state.currentPdfDoc.numPages; i++) {
+                state.selectedPages.add(i);
+            }
+            updateThumbnailsSelection();
+        }
+
+        function deselectAllPages() {
+            state.selectedPages.clear();
+            updateThumbnailsSelection();
+        }
+
+        async function confirmPdfExtraction() {
+            if (!state.currentPdfDoc) return;
+            
+            const pagesToExtract = Array.from(state.selectedPages).sort((a, b) => a - b);
+            
+            if (pagesToExtract.length === 0) {
+                alert('ページが選択されていません。サムネイルをクリックするか、範囲を入力して選択してください。');
+                return;
+            }
+
+            pageSelector.classList.add('hidden');
+            showLoading(`${pagesToExtract.length}ページを抽出中...`);
+
+            for (const pageNum of pagesToExtract) {
+                await extractPageAsImage(state.currentPdfDoc, pageNum, state.currentFile.name);
+            }
+
+            // クリーンアップ
+            state.currentPdfDoc = null;
+            state.currentFile = null;
+            state.selectedPages.clear();
+            
+            hideLoading();
+            renderMaterialList();
+            renderPreview();
+        }
+
+        async function extractPageAsImage(pdfDoc, pageNum, fileName) {
+            const page = await pdfDoc.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 2.0 }); // 高画質のため2倍スケール
+            
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            await page.render({ canvasContext: context, viewport: viewport }).promise;
+            
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+            
+            addMaterial({
+                type: 'pdf_page',
+                src: dataUrl,
+                originalName: fileName,
+                pageNum: pageNum,
+                width: canvas.width,
+                height: canvas.height
+            });
+        }
+
+        // --- 画像処理 ---
+        function processImage(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        addMaterial({
+                            type: 'image',
+                            src: e.target.result,
+                            originalName: file.name,
+                            pageNum: null,
+                            width: img.width,
+                            height: img.height
+                        });
+                        renderMaterialList();
+                        renderPreview();
+                        resolve();
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function addMaterial(item) {
+            item.id = Date.now() + Math.random().toString(36).substr(2, 9);
+            state.materials.push(item);
+            updateItemCount();
+        }
+
+        function removeMaterial(id) {
+            state.materials = state.materials.filter(m => m.id !== id);
+            renderMaterialList();
+            renderPreview();
+            updateItemCount();
+        }
+        
+        function moveMaterial(index, direction) {
+            if (direction === -1 && index > 0) {
+                [state.materials[index], state.materials[index - 1]] = [state.materials[index - 1], state.materials[index]];
+            } else if (direction === 1 && index < state.materials.length - 1) {
+                [state.materials[index], state.materials[index + 1]] = [state.materials[index + 1], state.materials[index]];
+            }
+            renderMaterialList();
+            renderPreview();
+        }
+        
+        function clearAll() {
+            if(!confirm('全てのデータをクリアしますか？')) return;
+            state.materials = [];
+            renderMaterialList();
+            renderPreview();
+            updateItemCount();
+        }
+        
+        function updateItemCount() {
+            itemCount.innerText = `${state.materials.length}枚`;
+        }
+
+        // --- リスト描画 ---
+        function renderMaterialList() {
+            materialList.innerHTML = '';
+            if (state.materials.length === 0) {
+                materialList.innerHTML = '<p class="text-xs text-slate-400 text-center py-4">ファイルを追加してください</p>';
+                return;
+            }
+
+            state.materials.forEach((item, index) => {
+                const div = document.createElement('div');
+                div.className = 'bg-white p-2 rounded shadow-sm border border-slate-200 flex gap-3 items-center group';
+                
+                // サムネイル
+                div.innerHTML = `
+                    <div class="w-12 h-16 bg-slate-100 flex-shrink-0 border border-slate-100 overflow-hidden relative">
+                        <img src="${item.src}" class="w-full h-full object-contain">
+                        <div class="absolute bottom-0 right-0 bg-black bg-opacity-50 text-white text-[10px] px-1">
+                            ${index + 1}
+                        </div>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <p class="text-xs font-bold text-slate-700 truncate">${item.originalName}</p>
+                        <p class="text-[10px] text-slate-500">${item.pageNum ? 'p.' + item.pageNum : '画像'}</p>
+                    </div>
+                    <div class="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                         <div class="flex gap-1">
+                            <button onclick="moveMaterial(${index}, -1)" class="p-1 bg-slate-100 hover:bg-slate-200 rounded text-slate-600 ${index === 0 ? 'invisible' : ''}">↑</button>
+                            <button onclick="moveMaterial(${index}, 1)" class="p-1 bg-slate-100 hover:bg-slate-200 rounded text-slate-600 ${index === state.materials.length - 1 ? 'invisible' : ''}">↓</button>
+                        </div>
+                        <button onclick="removeMaterial('${item.id}')" class="p-1 bg-red-50 hover:bg-red-100 text-red-500 rounded text-xs">削除</button>
+                    </div>
+                `;
+                materialList.appendChild(div);
+            });
+        }
+
+        // --- プレビュー生成 & 描画ロジック ---
+        async function renderPreview() {
+            state.layout = parseInt(layoutSelect.value);
+            state.orientation = orientationSelect.value;
+            canvasWrapper.innerHTML = '';
+
+            // A4サイズ設定 (mm)
+            // Portrait: 210 x 297, Landscape: 297 x 210
+            let pageWidth, pageHeight;
+            if (state.orientation === 'landscape') {
+                pageWidth = 297;
+                pageHeight = 210;
+            } else {
+                pageWidth = 210;
+                pageHeight = 297;
+            }
+
+            if (state.materials.length === 0) {
+                // 待機中表示もサイズに合わせる
+                canvasWrapper.innerHTML = `<div class="flex items-center justify-center text-slate-300 bg-white" style="width:${pageWidth}mm; height:${pageHeight}mm;">プレビュー待機中...</div>`;
+                return;
+            }
+
+            const PADDING = 10; // mm
+
+            // レイアウト計算
+            let rows, cols;
+            if (state.layout === 1) { 
+                rows = 1; cols = 1; 
+            } else if (state.layout === 2) { 
+                // 横向きの場合は縦に2つ並べると窮屈かもしれないが、基本ルールとしては
+                // 縦置き(Portrait): 横並び(2x1) ではなく 縦並び(1x2) が一般的？
+                // 要件の「横並び」を尊重しつつ、用紙向きに合わせて柔軟に対応
+                if (state.orientation === 'landscape') {
+                    rows = 1; cols = 2; // 横長の紙なら左右に並べる
+                } else {
+                    rows = 2; cols = 1; // 縦長の紙なら上下に並べる
+                }
+            } else { // 4分割
+                rows = 2; cols = 2; 
+            }
+
+            const itemsPerPage = rows * cols;
+            const totalPages = Math.ceil(state.materials.length / itemsPerPage);
+
+            for (let p = 0; p < totalPages; p++) {
+                const canvas = document.createElement('canvas');
+                // 高解像度（画面表示用、印刷時はPDF生成側で制御）
+                const scale = 2; 
+                // 1mm ≒ 3.78px
+                const pxPerMm = 3.78;
+                
+                canvas.width = Math.floor(pageWidth * pxPerMm * scale); 
+                canvas.height = Math.floor(pageHeight * pxPerMm * scale);
+                canvas.style.width = pageWidth + 'mm';
+                canvas.style.height = pageHeight + 'mm';
+                canvas.className = 'bg-white shadow-lg mb-8';
+
+                const ctx = canvas.getContext('2d');
+                ctx.scale(scale, scale);
+                
+                // 背景白
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, canvas.width/scale, canvas.height/scale);
+
+                // グリッド描画
+                const cellW = (pageWidth - (PADDING * 2)) / cols;
+                const cellH = (pageHeight - (PADDING * 2)) / rows;
+
+                for (let i = 0; i < itemsPerPage; i++) {
+                    const materialIndex = p * itemsPerPage + i;
+                    if (materialIndex >= state.materials.length) break;
+
+                    const item = state.materials[materialIndex];
+                    const img = new Image();
+                    img.src = item.src;
+                    
+                    // 非同期読み込みを待機
+                    await new Promise(r => { if(img.complete) r(); else img.onload = r; });
+
+                    const row = Math.floor(i / cols);
+                    const col = i % cols;
+
+                    const x = PADDING + (col * cellW);
+                    const y = PADDING + (row * cellH);
+
+                    // アスペクト比維持でフィットさせる
+                    const imgRatio = item.width / item.height;
+                    const cellRatio = cellW / cellH;
+
+                    let drawW, drawH, drawX, drawY;
+
+                    if (imgRatio > cellRatio) {
+                        // 画像の方が横長 -> 幅に合わせる
+                        drawW = cellW - 4; // マージン
+                        drawH = drawW / imgRatio;
+                    } else {
+                        // 画像の方が縦長 -> 高さに合わせる
+                        drawH = cellH - 4;
+                        drawW = drawH * imgRatio;
+                    }
+                    
+                    // 中央寄せ
+                    drawX = x + (cellW - drawW) / 2;
+                    drawY = y + (cellH - drawH) / 2;
+
+                    ctx.drawImage(img, drawX * pxPerMm, drawY * pxPerMm, drawW * pxPerMm, drawH * pxPerMm);
+                    
+                    // 枠線（オプション）
+                    ctx.strokeStyle = '#e2e8f0';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(x * pxPerMm, y * pxPerMm, cellW * pxPerMm, cellH * pxPerMm);
+                }
+
+                canvasWrapper.appendChild(canvas);
+            }
+        }
+
+
+        // --- PDFダウンロード ---
+        async function downloadPDF() {
+            if (state.materials.length === 0) return alert("素材がありません");
+            
+            showLoading('PDFを作成中...');
+            
+            // jsPDF初期化
+            const { jsPDF } = window.jspdf;
+            const orientation = state.orientation === 'landscape' ? 'l' : 'p';
+            const doc = new jsPDF(orientation, 'mm', 'a4');
+
+            // サイズ設定
+            let pageWidth, pageHeight;
+            if (state.orientation === 'landscape') {
+                pageWidth = 297;
+                pageHeight = 210;
+            } else {
+                pageWidth = 210;
+                pageHeight = 297;
+            }
+
+            const PADDING = 10;
+            
+            // レイアウト再計算
+            let rows, cols;
+            if (state.layout === 1) { 
+                rows = 1; cols = 1; 
+            } else if (state.layout === 2) { 
+                if (state.orientation === 'landscape') {
+                    rows = 1; cols = 2; 
+                } else {
+                    rows = 2; cols = 1; 
+                }
+            } else { 
+                rows = 2; cols = 2; 
+            }
+
+            const itemsPerPage = rows * cols;
+            const totalPages = Math.ceil(state.materials.length / itemsPerPage);
+
+            for (let p = 0; p < totalPages; p++) {
+                if (p > 0) doc.addPage();
+
+                const cellW = (pageWidth - (PADDING * 2)) / cols;
+                const cellH = (pageHeight - (PADDING * 2)) / rows;
+
+                for (let i = 0; i < itemsPerPage; i++) {
+                    const materialIndex = p * itemsPerPage + i;
+                    if (materialIndex >= state.materials.length) break;
+
+                    const item = state.materials[materialIndex];
+                    
+                    // 配置計算
+                    const row = Math.floor(i / cols);
+                    const col = i % cols;
+                    const x = PADDING + (col * cellW);
+                    const y = PADDING + (row * cellH);
+
+                    // サイズ計算
+                    const imgRatio = item.width / item.height;
+                    const cellRatio = cellW / cellH;
+                    let drawW, drawH;
+
+                    if (imgRatio > cellRatio) {
+                        drawW = cellW - 4; 
+                        drawH = drawW / imgRatio;
+                    } else {
+                        drawH = cellH - 4;
+                        drawW = drawH * imgRatio;
+                    }
+                    
+                    const drawX = x + (cellW - drawW) / 2;
+                    const drawY = y + (cellH - drawH) / 2;
+
+                    // jsPDFに追加
+                    doc.addImage(item.src, 'JPEG', drawX, drawY, drawW, drawH);
+                    
+                    // 境界線（薄く）
+                    doc.setDrawColor(220, 220, 220);
+                    doc.rect(x, y, cellW, cellH);
+                }
+            }
+
+            doc.save('extracted_worksheet.pdf');
+            hideLoading();
+        }
+
+    </script>
+</body>
+</html>
